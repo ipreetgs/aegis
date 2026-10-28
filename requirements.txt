@@ -1,0 +1,9 @@
+# Core (required only for --endpoint scanner)
+httpx>=0.27.0
+
+# AI triage (optional — only needed if using --ai flag)
+# openai>=1.30.0
+
+# All other scanners use Python stdlib only.
+# Active VAPT tool dependencies (installed on OS, not via pip):
+#   nmap, nikto, nuclei, sqlmap, ffuf, amass

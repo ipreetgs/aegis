@@ -1,0 +1,24 @@
+[project]
+name = "aegis"
+version = "2.0.0"
+description = "Production-grade VAPT engine — defensive + offensive scan surfaces, AI triage, RE analysis"
+requires-python = ">=3.10"
+dependencies = []   # stdlib-only core; extras below
+
+[project.optional-dependencies]
+# Passive web scan
+endpoint = ["httpx>=0.27.0"]
+# AI-assisted triage (GPT-4o)
+ai = ["openai>=1.30.0"]
+# Full active + AI
+full = [
+    "httpx>=0.27.0",
+    "openai>=1.30.0",
+]
+
+[project.scripts]
+aegis = "aegis.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

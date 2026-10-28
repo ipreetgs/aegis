@@ -1,0 +1,24 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# aegis runtime index
+*.db
+*.db-wal
+*.db-shm
+
+# Vendored reference tooling — analysed for integration, not part of this repo.
+# These are upstream clones/installers with their own history and large binaries.
+helper-tools/
+reveng/
+
+# Editor / session scaffolding
+.claude/
+.idea/
+.vscode/
