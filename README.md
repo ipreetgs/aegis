@@ -42,6 +42,7 @@ python -m aegis ingest kev       --path known_exploited_vulnerabilities.json
 python -m aegis scan --code   ./myproject
 python -m aegis scan --image  ./myimage.tar          # docker save -o myimage.tar repo:tag
 python -m aegis scan --endpoint https://app.example.com --scope app.example.com --json
+python -m aegis scan --surface https://app.example.com --scope app.example.com
 python -m aegis scan --trivy  ./myimage.tar          # SCA / IaC / secrets (needs trivy)
 python -m aegis scan --binary ./suspicious.apk       # static RE: ELF/PE/APK/ZIP
 python -m aegis scan --active https://app.example.com --scope app.example.com --zap
@@ -54,6 +55,7 @@ python -m aegis scan --active https://app.example.com --scope app.example.com --
 | `--code`     | source secrets + dangerous-sink + dependency correlation                 | stdlib |
 | `--image`    | container tarball unpack + OS/lang package correlation                   | stdlib |
 | `--endpoint` | passive web hygiene (headers, exposed files, GHDB concrete paths)        | httpx |
+| `--surface`  | native edge/cloud map (DNS→CDN→WAF→LB→origin/S3) + web vuln-class *detection* (XSS/CSRF/SSRF/RCE-class), exploit-availability tagged | httpx (stdlib DNS/TLS) |
 | `--trivy`    | SCA (OS/lang pkgs), IaC misconfig, secrets — CVEs enriched from the index | trivy |
 | `--binary`   | static reverse-engineering (ELF/PE hardening + sections/imports, APK/ZIP) | stdlib (+ optional `rea` CLI) |
 | `--active`   | authorized blackbox VAPT orchestration (scope-gated, non-destructive)    | nmap, nikto, nuclei, whois, amass, ZAP baseline, opt-in sqlmap/ffuf |

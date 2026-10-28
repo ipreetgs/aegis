@@ -70,6 +70,16 @@ never a silent miss.
 - **`--endpoint`** ([`scanners/endpoint_scan.py`](aegis/scanners/endpoint_scan.py))
   — async httpx core: security-header analysis, exposed-file hygiene, and GHDB
   *concrete-path* signatures as plain GETs. Scope-gated and rate-limited.
+- **`--surface`** ([`scanners/surface_scan.py`](aegis/scanners/surface_scan.py))
+  — native, from-scratch (no external tools) read-only mapping of the delivery
+  chain **DNS → CDN → WAF → ALB/NLB → origin / S3 / cluster** plus web
+  vulnerability-*class* detection: a stdlib UDP DNS client walks the CNAME/A/NS
+  chain; CDN/WAF/LB/S3 are fingerprinted from CNAMEs + response headers; TLS
+  certs are inspected read-only; it detects reflected-input (potential XSS via a
+  benign canary, never a payload), token-less POST forms (CSRF), SSRF/open-
+  redirect-prone parameters (surface only), subdomain-takeover fingerprints, and
+  correlates `Server`/`X-Powered-By` versions against the index for RCE-class
+  CVEs. It sends no exploit, drops no shell, changes no state.
 - **`--trivy`** ([`scanners/trivy_scan.py`](aegis/scanners/trivy_scan.py)) —
   orchestrates `trivy` (detected on PATH) in JSON mode over a local image/fs/
   config artifact; normalizes vuln/misconfig/secret results into findings and

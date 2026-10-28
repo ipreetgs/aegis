@@ -25,6 +25,9 @@
     aegis scan --active    https://app.example.com --scope app.example.com \\
                --sqli --fuzz --zap --no-recon
 
+    ── Edge/cloud + web-exposure detection (authorized targets only) ─────────
+    aegis scan --surface   https://app.example.com --scope app.example.com
+
     ── Reverse engineering ────────────────────────────────────────────────────
     aegis scan --binary    ./suspicious.elf            # ELF/PE/APK/ZIP
 
@@ -76,11 +79,14 @@ def main(argv=None) -> int:
                    help="Reverse-engineering analysis of a binary file")
     g.add_argument("--trivy",    metavar="TARGET",
                    help="Trivy SCA / IaC-misconfig / secret scan of a local artifact")
+    g.add_argument("--surface",  metavar="URL",
+                   help="Native edge/cloud + web-exposure detection (DNS→CDN→WAF→"
+                        "LB→origin/S3; XSS/CSRF/SSRF/RCE-class) — authorized only")
 
     # Common options
     sc.add_argument("--scope", action="append", default=[],
                     help="Authorized hostname/IP (repeatable). REQUIRED for "
-                         "--endpoint and --active.")
+                         "--endpoint, --active, and --surface.")
     sc.add_argument("--rps", type=float, default=2.0,
                     help="Requests/sec rate limit per host (default: 2)")
     sc.add_argument("--concurrency", type=int, default=8,
@@ -240,6 +246,23 @@ def _scan(store: Store, args) -> int:
         print(out)
         if ai_enabled:
             _ai_trivy_triage(report)
+        return 0
+
+    # ── Surface: edge/cloud + web-exposure detection ───────────────────────────
+    if args.surface:
+        from aegis.scanners import surface_scan
+        if not args.scope:
+            print("ERROR: --surface requires --scope <hostname>. Refusing to scan.",
+                  file=sys.stderr)
+            return 3
+        scope = surface_scan.Scope(hosts=set(args.scope))
+        report = asyncio.run(surface_scan.scan(
+            store, args.surface, scope,
+            concurrency=args.concurrency, per_host_rps=args.rps))
+        out = _render_surface(report, args)
+        print(out)
+        if ai_enabled:
+            _ai_surface_triage(report)
         return 0
 
     # ── Reverse engineering ───────────────────────────────────────────────────
@@ -431,6 +454,64 @@ def _render_trivy(report, args):
     return "\n".join(lines) + "\n"
 
 
+def _render_surface(report, args):
+    import json as _json
+    from aegis.report.render import _SEV_ORDER
+    findings = sorted(report.findings,
+                      key=lambda f: (-(f.score or 0), _SEV_ORDER.get(f.severity, 9)))
+    summary = {b: 0 for b in ("critical", "high", "medium", "low", "info")}
+    for f in report.findings:
+        summary[f.severity] = summary.get(f.severity, 0) + 1
+    summary["total"] = len(report.findings)
+
+    if args.json:
+        out = {
+            "tool": "aegis", "mode": "surface",
+            "target": report.target, "scope": report.scope,
+            "dns": report.dns, "edge": report.edge,
+            "requests_sent": report.requests_sent, "errors": report.errors,
+            "summary": summary,
+            "findings": [
+                {
+                    "layer": f.layer, "check": f.check, "severity": f.severity,
+                    "target": f.target, "detail": f.detail, "evidence": f.evidence,
+                    "cve_ids": f.cve_ids, "exploit_available": f.exploit_available,
+                    "score": f.score, "priority": f.priority,
+                }
+                for f in findings
+            ],
+        }
+        return _json.dumps(out, indent=2, default=str)
+
+    lines = [
+        f"\n  aegis · surface (edge/cloud + web-exposure) scan",
+        f"  Target:  {report.target}",
+        f"  Scope:   {', '.join(report.scope)}",
+        f"  DNS:     A={', '.join(report.dns.get('a', [])[:4]) or '—'}  "
+        f"CNAME={', '.join(report.dns.get('cname', [])[:3]) or '—'}",
+        f"  Requests: {report.requests_sent}",
+        f"  {summary['total']} findings  "
+        f"(critical {summary['critical']} · high {summary['high']} · "
+        f"medium {summary['medium']} · low {summary['low']} · info {summary['info']})",
+        "  " + "─" * 72,
+    ]
+    for f in findings[:300]:
+        sev = f.severity.upper().ljust(8)
+        prio = f"[{f.priority}] " if f.priority else ""
+        tag = " ⚑EXPLOIT" if f.exploit_available else ""
+        lines.append(f"  {sev} {prio}[{f.layer}] {f.check}{tag}")
+        lines.append(f"           {f.target}")
+        if f.detail:
+            lines.append(f"           {f.detail[:160]}")
+        if f.cve_ids:
+            lines.append(f"           CVEs: {', '.join(f.cve_ids[:5])}")
+    if report.errors:
+        lines.append("\n  WARNINGS:")
+        for e in report.errors[:20]:
+            lines.append(f"    • {e}")
+    return "\n".join(lines) + "\n"
+
+
 # ── AI triage wrappers ────────────────────────────────────────────────────────
 
 def _ai_narrative(mode, report, args):
@@ -458,6 +539,18 @@ def _ai_trivy_triage(report):
     from aegis.ai_triage import triage_findings
     findings_dicts = [
         {"id": f.id, "severity": f.severity, "detail": f.detail,
+         "cve_ids": f.cve_ids, "score": f.score}
+        for f in report.findings
+    ]
+    print("\n─── AI Triage (Top-10 Prioritized) ─────────────────────────────")
+    print(triage_findings(findings_dicts))
+    print("────────────────────────────────────────────────────────────────\n")
+
+
+def _ai_surface_triage(report):
+    from aegis.ai_triage import triage_findings
+    findings_dicts = [
+        {"id": f.check, "severity": f.severity, "detail": f.detail,
          "cve_ids": f.cve_ids, "score": f.score}
         for f in report.findings
     ]
