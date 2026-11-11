@@ -28,15 +28,10 @@ Nothing but httpx is required, and only for endpoint scans. Ingest and the
 ## Quick start
 
 ```bash
-# 1. build the index
-python -m aegis init-db
-python -m aegis ingest nvd       --path 'feeds/nvdcve-*.json*'
-python -m aegis ingest osv       --path 'osv/**/*.json'
-python -m aegis ingest exploitdb --repo /opt/exploitdb
-python -m aegis ingest msf       --cache /opt/metasploit-framework/db/modules_metadata_base.json
-python -m aegis ingest ghdb      --path ghdb.json
-python -m aegis ingest epss      --path epss_scores-latest.csv.gz
-python -m aegis ingest kev       --path known_exploited_vulnerabilities.json
+# 1. set up — ONE command: init schema + ingest any snapshots found in ./feeds
+python -m aegis init                       # or: aegis init --feeds-dir /path/to/feeds
+# (works with zero feeds too — the DB is ready; CVE enrichment fills in once you
+#  add snapshots and re-run `aegis init`. It is idempotent.)
 
 # 2. scan
 python -m aegis scan --code   ./myproject
@@ -49,6 +44,45 @@ python -m aegis scan --active https://app.example.com --scope app.example.com --
 python -m aegis scan --audit  https://app.example.com --scope app.example.com   # vulnsurvey web audit
 python -m aegis scan --audit  ./myproject                                       # deps + secrets, no network
 python -m aegis --ai scan --audit ./myproject                                   # + AI triage & remediation
+```
+
+### Setup (`aegis init`)
+
+`aegis init` is the all-in-one setup: it creates the schema and ingests every
+feed snapshot it finds, so one command leaves the DB ready to scan. It is
+idempotent and non-interactive (safe to re-run and to use in CI). aegis never
+downloads feeds — you place snapshots in the feeds directory and init loads them.
+
+Feeds directory: `--feeds-dir DIR`, else `$AEGIS_FEEDS_DIR`, else `./feeds`.
+Conventional names it auto-detects:
+
+| feed | looks for (under the feeds dir) |
+|------|---------------------------------|
+| NVD        | `nvdcve-*.json*`, `nvd*.json*` |
+| OSV        | `osv/**/*.json`, `osv*.json` |
+| Exploit-DB | `exploitdb/` (a clone of the repo) |
+| Metasploit | `modules_metadata_base.json`, `metasploit-framework/db/modules_metadata_base.json` |
+| GHDB       | `ghdb.json` / `ghdb*.csv` |
+| EPSS       | `epss_scores*.csv.gz` |
+| KEV        | `known_exploited_vulnerabilities.json` |
+
+Per-feed control is still available with `aegis ingest <feed> --path/--repo/--cache ...`.
+
+Local:
+
+```bash
+python -m aegis init                 # ./feeds
+python -m aegis scan --code ./myproject
+```
+
+CI (GitHub Actions) — restore a cached feeds dir, set up, then scan with a gate:
+
+```yaml
+- run: pip install -e .
+- uses: actions/cache@v4
+  with: { path: feeds, key: aegis-feeds-${{ github.run_id }}, restore-keys: aegis-feeds- }
+- run: python -m aegis --db aegis.db init --feeds-dir feeds   # --strict to fail if no feeds loaded
+- run: python -m aegis --json --db aegis.db scan --audit . > aegis-report.json
 ```
 
 ### Scan surfaces

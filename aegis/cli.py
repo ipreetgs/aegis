@@ -66,6 +66,14 @@ def main(argv=None) -> int:
     # ── init-db ──────────────────────────────────────────────────────────────
     sub.add_parser("init-db", help="Initialize the SQLite intelligence schema")
 
+    # ── init (all-in-one setup) ────────────────────────────────────────────────
+    initp = sub.add_parser(
+        "init", help="One-command setup: init schema + ingest any local feed snapshots")
+    initp.add_argument("--feeds-dir",
+                       help="directory of feed snapshots (default: ./feeds or $AEGIS_FEEDS_DIR)")
+    initp.add_argument("--strict", action="store_true",
+                       help="exit non-zero if no feed records were ingested")
+
     # ── ingest ───────────────────────────────────────────────────────────────
     ing = sub.add_parser("ingest", help="Ingest a vulnerability/exploit feed")
     ing.add_argument("feed",
@@ -155,6 +163,9 @@ def main(argv=None) -> int:
         print(f"initialized schema in {args.db}")
         return 0
 
+    if args.cmd == "init":
+        return _init(store, args)
+
     if args.cmd == "ingest":
         return _ingest(store, args)
 
@@ -162,6 +173,46 @@ def main(argv=None) -> int:
         return _scan(store, args)
 
     return 1
+
+
+# ── init (all-in-one setup) ─────────────────────────────────────────────────
+
+def _init(store: Store, args) -> int:
+    from aegis.bootstrap import run_init
+    summary = run_init(store, getattr(args, "feeds_dir", None))
+    print(_render_init(summary, args))
+    if getattr(args, "strict", False) and summary["total_records"] == 0:
+        return 1
+    return 0
+
+
+def _render_init(summary, args) -> str:
+    if args.json:
+        import json as _json
+        return _json.dumps({"tool": "aegis", "cmd": "init", "db": args.db, **summary}, indent=2)
+    exists = "" if summary["feeds_dir_exists"] else "  (not found — create it and add snapshots)"
+    lines = [
+        f"\n  aegis · init — database ready at {args.db}",
+        f"  Feeds dir: {summary['feeds_dir']}{exists}",
+        "  " + "─" * 68,
+    ]
+    marks = {"ok": "✓", "skipped": "–", "error": "✗"}
+    for r in summary["results"]:
+        detail = f"{r['records']} records" if r["status"] == "ok" else r["detail"]
+        lines.append(f"  {marks.get(r['status'], '?')} {r['feed']:<10} {detail}")
+    lines.append("  " + "─" * 68)
+    lines.append(f"  {summary['feeds_loaded']} feed(s) loaded · {summary['total_records']} records")
+    if summary["total_records"] == 0:
+        lines.append("  note: no feeds ingested — scanning works, but CVE enrichment will be empty.")
+        lines.append("        add snapshots to the feeds dir and re-run `aegis init` (idempotent).")
+    lines += [
+        "",
+        "  ready. now scan, e.g.:",
+        "    aegis scan --code    ./myproject",
+        "    aegis scan --audit   ./myproject",
+        "    aegis scan --surface https://app.example.com --scope app.example.com",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 # ── Ingest dispatcher ─────────────────────────────────────────────────────────
