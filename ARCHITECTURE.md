@@ -9,6 +9,37 @@ from three scan surfaces against that index — with no third-party scanning API
 > allowlist), rate-limited, and non-destructive by design. See
 > [`aegis/scanners/endpoint_scan.py`](aegis/scanners/endpoint_scan.py).
 
+## Integrated detection engines
+
+aegis integrates two sibling, stdlib-only, detection-only engines, loaded
+optionally via [`aegis/integrations/`](aegis/integrations/):
+
+- **netsurvey** → [`integrations/netsurvey_discovery.py`](aegis/integrations/netsurvey_discovery.py):
+  native host/port/service/OS discovery for the `--active` surface's discovery
+  phase (removes the hard `nmap` dependency). Scope is enforced twice — aegis
+  passes only in-scope hosts, and netsurvey is configured with an
+  `allowed_networks` allow-list of their resolved addresses.
+- **vulnsurvey** → [`aegis/scanners/audit_scan.py`](aegis/scanners/audit_scan.py)
+  (the `--audit` surface): deep web detection (report-only active probes), plus
+  dependency/CVE and secret scanning. Its findings are normalised to the aegis
+  finding schema, scored by `scoring.prioritize`, and run through the same
+  exploit-availability correlation as every other surface.
+
+Both engines are detection-only. Across every surface except `--verify`,
+Metasploit stays **metadata-only**: the index records *that a module exists*
+(`msf_module` + `ref_link`), and the `--ai`/local triage names it as a
+prioritisation signal with a manual-verification recommendation.
+
+The `--verify` surface
+([`integrations/metasploit_runner.py`](aegis/integrations/metasploit_runner.py))
+is the sole place aegis can drive the **real, installed** `msfconsole` — never
+embedded or ported exploit code. Its default is the module's safe `check`
+(no payload). Actual exploitation (`--exploit`) is gated in code and cannot be
+reached without: the flag + exactly one explicit module, an in-scope target, an
+interactive TTY, and the operator typing the target to confirm; otherwise it
+prints the resource script and runs nothing. Detection never auto-chains into
+exploitation.
+
 ## Data flow
 
 ```

@@ -291,6 +291,25 @@ def _nmap_sev(sid, output):
 
 
 # ---------------------------------------------------------------------------
+# NETSURVEY — native (stdlib) host/port/service/OS discovery
+# ---------------------------------------------------------------------------
+
+def run_netsurvey(targets, scope, report):
+    """Native discovery via the integrated netsurvey engine (no external nmap).
+
+    Adds open-port, service-version and OS-family inventory findings. Discovery
+    only — it sends no exploit traffic.
+    """
+    from aegis.integrations import netsurvey_discovery as nd
+    findings, errors = nd.discover(targets, scope.hosts)
+    report.errors.extend(errors)
+    if findings:
+        report.tool_versions["netsurvey"] = "native"
+    for d in findings:
+        report.findings.append(ActiveFinding(**d))
+
+
+# ---------------------------------------------------------------------------
 # NIKTO
 # ---------------------------------------------------------------------------
 
@@ -617,6 +636,7 @@ def scan(
     run_fuzz=False,
     run_whois_lookup=True,
     run_zap_baseline=False,
+    run_net=True,
 ):
     """Run the full active VAPT pipeline against scoped targets."""
     in_scope = [t for t in targets
@@ -639,6 +659,8 @@ def scan(
     all_targets = list({*in_scope, *extra_hosts})
 
     if run_ports:
+        if run_net:
+            run_netsurvey(all_targets, scope, report)
         run_nmap(all_targets, scope, report)
 
     if run_web:

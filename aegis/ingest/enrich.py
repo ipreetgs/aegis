@@ -24,7 +24,9 @@ def ingest_epss(store: Store, csv_path: str) -> int:
     n = 0
     with opener(p, "rt", encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            if line.startswith("#") or line.lower().startswith("cve"):
+            # Skip comment lines and the CSV header only — NOT the CVE data rows
+            # (which start with "CVE-", whereas the header is "cve,epss,percentile").
+            if line.startswith("#") or line.lower().startswith("cve,"):
                 continue
             cols = line.strip().split(",")
             if len(cols) < 3:

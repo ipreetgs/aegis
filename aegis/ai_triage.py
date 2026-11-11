@@ -71,10 +71,14 @@ _SYS_POC = (
 )
 
 _SYS_TRIAGE = (
-    "You are a VAPT lead. Given a JSON list of vulnerability findings, "
-    "rank the top 10 by exploitation likelihood and business impact. "
-    "For each, give: rank, finding id, one-line risk rationale, "
-    "recommended fix, and MITRE ATT&CK technique. Return as JSON array."
+    "You are a VAPT lead triaging findings for a DEFENSIVE, detection-only tool. "
+    "Given a JSON list of vulnerability findings, rank the top 10 by exploitation "
+    "likelihood and business impact. For each, give: rank, finding id, one-line "
+    "risk rationale, recommended fix (remediation/hardening), and MITRE ATT&CK "
+    "technique. If a finding notes that a Metasploit module or public exploit "
+    "exists, treat that ONLY as a prioritization signal and recommend manual, "
+    "authorized verification — do NOT provide exploit code, payloads, or "
+    "step-by-step exploitation. The tool never launches exploits. Return a JSON array."
 )
 
 _SYS_NARRATIVE = (
@@ -143,3 +147,96 @@ def analyze_binary_behavior(description: str) -> str:
     """AI-assisted reverse engineering analysis of binary behavior or snippet."""
     user = f"Binary/behavior description:\n{description[:3000]}"
     return _chat(_SYS_RE, user, max_tokens=800)
+
+
+# ── Deterministic, offline triage (no API key required) ───────────────────────
+
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+_GENERIC_FIX = {
+    "critical": "Patch or remove the affected component immediately and verify the fix.",
+    "high": "Prioritise remediation this cycle; apply the vendor fix or mitigation.",
+    "medium": "Schedule a fix; apply configuration hardening in the meantime.",
+    "low": "Address during routine maintenance.",
+    "info": "Review for defence-in-depth; no urgent action required.",
+}
+
+
+def _finding_get(f, *keys, default=""):
+    for k in keys:
+        v = f.get(k) if isinstance(f, dict) else getattr(f, k, None)
+        if v:
+            return v
+    return default
+
+
+def local_triage(findings: list, store=None, top: int = 10) -> str:
+    """Prioritised, remediation-focused suggestions computed locally.
+
+    Works with no OpenAI dependency. For CVE-bearing findings it looks up the
+    local intelligence index for exploit-availability (Exploit-DB / Metasploit
+    module / KEV / EPSS) and surfaces it as a *prioritization signal* with a
+    manual-verification recommendation. aegis never launches an exploit.
+    """
+    if not findings:
+        return "No findings to triage."
+    ordered = sorted(
+        findings,
+        key=lambda f: (-(float(_finding_get(f, "score", default=0) or 0)),
+                       _SEV_ORDER.get(str(_finding_get(f, "severity", default="info")).lower(), 9)),
+    )
+    lines = ["Prioritised remediation (local triage — detection-only, no exploits launched):"]
+    for rank, f in enumerate(ordered[:top], 1):
+        fid = _finding_get(f, "id", "check", default="finding")
+        sev = str(_finding_get(f, "severity", default="info")).lower()
+        score = _finding_get(f, "score", default=0)
+        detail = str(_finding_get(f, "detail", default=""))[:160]
+        cves = _finding_get(f, "cve_ids", default=[]) or []
+        lines.append(f"  {rank}. [{sev.upper()}] {fid}  (score {score})")
+        if detail:
+            lines.append(f"       risk: {detail}")
+        lines.append(f"       fix:  {_GENERIC_FIX.get(sev, _GENERIC_FIX['medium'])}")
+        if cves:
+            lines.append(f"       cves: {', '.join(cves[:6])}")
+        note = _exploit_note(cves, store)
+        if note:
+            lines.append(f"       intel: {note}")
+    lines.append("")
+    lines.append("Note: exploit-availability is a prioritisation signal only. Verify each "
+                 "manually under written authorization; aegis does not run exploits.")
+    return "\n".join(lines)
+
+
+def _exploit_note(cve_ids, store) -> str:
+    if not cve_ids or store is None:
+        return ""
+    try:
+        ev = store.evidence_for_cves(cve_ids)
+    except Exception:
+        return ""
+    if not ev.get("cves_known"):
+        return ""
+    parts = []
+    if ev.get("msf_modules"):
+        mods = ", ".join(m["fullname"] for m in ev["msf_modules"][:3])
+        parts.append(f"Metasploit module(s) exist ({mods}) — verify manually, not launched")
+    elif ev.get("n_msf"):
+        parts.append(f"{ev['n_msf']} Metasploit module(s) referenced — verify manually")
+    if ev.get("n_exploits"):
+        parts.append(f"{ev['n_exploits']} Exploit-DB entr{'y' if ev['n_exploits'] == 1 else 'ies'}")
+    if ev.get("kev"):
+        parts.append("CISA KEV (actively exploited in the wild)")
+    if ev.get("max_epss") is not None:
+        parts.append(f"EPSS {ev['max_epss']:.0%}")
+    return "; ".join(parts)
+
+
+def suggest_findings(findings: list, store=None) -> str:
+    """Unified suggestion layer: LLM ranking when available, always backed by the
+    deterministic local index for accurate exploit-availability."""
+    local = local_triage(findings, store)
+    if _client() is not None:
+        llm = triage_findings(findings)
+        if llm and not llm.startswith("(AI"):
+            return "AI ranking (GPT-4o):\n" + llm + "\n\n" + local
+    return local

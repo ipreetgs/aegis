@@ -44,6 +44,14 @@ from aegis.report import render
 
 
 def main(argv=None) -> int:
+    # Reports contain Unicode (box drawing, ellipsis from redaction). Make output
+    # robust on legacy consoles (e.g. Windows cp1252) instead of crashing.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     p = argparse.ArgumentParser(
         prog="aegis",
         description="native VAPT engine — defensive + offensive scan surfaces",
@@ -57,6 +65,14 @@ def main(argv=None) -> int:
 
     # ── init-db ──────────────────────────────────────────────────────────────
     sub.add_parser("init-db", help="Initialize the SQLite intelligence schema")
+
+    # ── init (all-in-one setup) ────────────────────────────────────────────────
+    initp = sub.add_parser(
+        "init", help="One-command setup: init schema + ingest any local feed snapshots")
+    initp.add_argument("--feeds-dir",
+                       help="directory of feed snapshots (default: ./feeds or $AEGIS_FEEDS_DIR)")
+    initp.add_argument("--strict", action="store_true",
+                       help="exit non-zero if no feed records were ingested")
 
     # ── ingest ───────────────────────────────────────────────────────────────
     ing = sub.add_parser("ingest", help="Ingest a vulnerability/exploit feed")
@@ -82,6 +98,13 @@ def main(argv=None) -> int:
     g.add_argument("--surface",  metavar="URL",
                    help="Native edge/cloud + web-exposure detection (DNS→CDN→WAF→"
                         "LB→origin/S3; XSS/CSRF/SSRF/RCE-class) — authorized only")
+    g.add_argument("--audit",    metavar="TARGET",
+                   help="Deep detection audit via vulnsurvey: a URL (web app, "
+                        "scope-gated) or a project directory (deps/secrets, no network)")
+    g.add_argument("--verify",   metavar="TARGET",
+                   help="Verify exploitability of scoped CVEs/modules by driving real "
+                        "Metasploit — safe `check` by default; --exploit runs it, hard-gated "
+                        "(in-scope + interactive typed confirmation). Authorized UAT/test only")
 
     # Common options
     sc.add_argument("--scope", action="append", default=[],
@@ -107,6 +130,24 @@ def main(argv=None) -> int:
                     help="[--active] Add OWASP ZAP baseline (passive) web scan")
     sc.add_argument("--no-whois", action="store_true",
                     help="[--active] Skip whois registration lookup in recon")
+    sc.add_argument("--no-net", action="store_true",
+                    help="[--active] Skip native netsurvey host/port/OS discovery")
+    sc.add_argument("--audit-dev", action="store_true",
+                    help="[--audit] Include development dependencies (project-dir audit)")
+
+    # Verify (Metasploit) options
+    sc.add_argument("--msf-module", action="append", default=[],
+                    help="[--verify] Metasploit module fullname (repeatable)")
+    sc.add_argument("--cve", action="append", default=[],
+                    help="[--verify] CVE mapped to module(s) via the local index (repeatable)")
+    sc.add_argument("--exploit", action="store_true",
+                    help="[--verify] Escalate from safe check to real exploitation — requires an "
+                         "in-scope target and interactive typed confirmation (authorized UAT only)")
+    sc.add_argument("--payload", help="[--verify --exploit] Metasploit PAYLOAD to set")
+    sc.add_argument("--lhost", help="[--verify --exploit] LHOST for the payload")
+    sc.add_argument("--dry-run", action="store_true",
+                    help="[--verify --exploit] Print the resource script only; execute nothing")
+    sc.add_argument("--msfconsole", help="[--verify] Path to msfconsole (defaults to PATH)")
 
     # Trivy options
     sc.add_argument("--trivy-kind",
@@ -122,6 +163,9 @@ def main(argv=None) -> int:
         print(f"initialized schema in {args.db}")
         return 0
 
+    if args.cmd == "init":
+        return _init(store, args)
+
     if args.cmd == "ingest":
         return _ingest(store, args)
 
@@ -129,6 +173,46 @@ def main(argv=None) -> int:
         return _scan(store, args)
 
     return 1
+
+
+# ── init (all-in-one setup) ─────────────────────────────────────────────────
+
+def _init(store: Store, args) -> int:
+    from aegis.bootstrap import run_init
+    summary = run_init(store, getattr(args, "feeds_dir", None))
+    print(_render_init(summary, args))
+    if getattr(args, "strict", False) and summary["total_records"] == 0:
+        return 1
+    return 0
+
+
+def _render_init(summary, args) -> str:
+    if args.json:
+        import json as _json
+        return _json.dumps({"tool": "aegis", "cmd": "init", "db": args.db, **summary}, indent=2)
+    exists = "" if summary["feeds_dir_exists"] else "  (not found — create it and add snapshots)"
+    lines = [
+        f"\n  aegis · init — database ready at {args.db}",
+        f"  Feeds dir: {summary['feeds_dir']}{exists}",
+        "  " + "─" * 68,
+    ]
+    marks = {"ok": "✓", "skipped": "–", "error": "✗"}
+    for r in summary["results"]:
+        detail = f"{r['records']} records" if r["status"] == "ok" else r["detail"]
+        lines.append(f"  {marks.get(r['status'], '?')} {r['feed']:<10} {detail}")
+    lines.append("  " + "─" * 68)
+    lines.append(f"  {summary['feeds_loaded']} feed(s) loaded · {summary['total_records']} records")
+    if summary["total_records"] == 0:
+        lines.append("  note: no feeds ingested — scanning works, but CVE enrichment will be empty.")
+        lines.append("        add snapshots to the feeds dir and re-run `aegis init` (idempotent).")
+    lines += [
+        "",
+        "  ready. now scan, e.g.:",
+        "    aegis scan --code    ./myproject",
+        "    aegis scan --audit   ./myproject",
+        "    aegis scan --surface https://app.example.com --scope app.example.com",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 # ── Ingest dispatcher ─────────────────────────────────────────────────────────
@@ -230,12 +314,13 @@ def _scan(store: Store, args) -> int:
             run_fuzz=args.fuzz,
             run_whois_lookup=not args.no_whois,
             run_zap_baseline=args.zap,
+            run_net=not args.no_net,
         )
         mode = "active"
         out = _render_active(report, args)
         print(out)
         if ai_enabled:
-            _ai_active_triage(report)
+            _ai_active_triage(report, store)
         return 0
 
     # ── Trivy: SCA / IaC / secrets ─────────────────────────────────────────────
@@ -245,7 +330,7 @@ def _scan(store: Store, args) -> int:
         out = _render_trivy(report, args)
         print(out)
         if ai_enabled:
-            _ai_trivy_triage(report)
+            _ai_trivy_triage(report, store)
         return 0
 
     # ── Surface: edge/cloud + web-exposure detection ───────────────────────────
@@ -262,7 +347,40 @@ def _scan(store: Store, args) -> int:
         out = _render_surface(report, args)
         print(out)
         if ai_enabled:
-            _ai_surface_triage(report)
+            _ai_surface_triage(report, store)
+        return 0
+
+    # ── Audit: deep detection via vulnsurvey (web URL or project dir) ───────────
+    if args.audit:
+        from aegis.scanners import audit_scan
+        is_url = args.audit.startswith(("http://", "https://"))
+        if is_url and not args.scope:
+            print("ERROR: --audit of a URL requires --scope <hostname>. Refusing to scan.",
+                  file=sys.stderr)
+            return 3
+        report = audit_scan.scan(store, args.audit, set(args.scope),
+                                 include_dev=args.audit_dev)
+        out = _render_audit(report, args)
+        print(out)
+        if ai_enabled:
+            _ai_audit_triage(report, store)
+        return 0
+
+    # ── Verify: Metasploit exploitability (check by default; exploit hard-gated) ─
+    if args.verify:
+        from aegis.integrations import metasploit_runner as msf
+        if not args.scope:
+            print("ERROR: --verify requires --scope <hostname>. Refusing.", file=sys.stderr)
+            return 3
+        if args.exploit:
+            _print_legal_banner()
+        report = msf.run(
+            store, args.verify, set(args.scope),
+            modules=args.msf_module, cves=args.cve,
+            exploit=args.exploit, payload=args.payload, lhost=args.lhost,
+            dry_run=args.dry_run, msfconsole=args.msfconsole,
+        )
+        print(_render_verify(report, args))
         return 0
 
     # ── Reverse engineering ───────────────────────────────────────────────────
@@ -512,6 +630,95 @@ def _render_surface(report, args):
     return "\n".join(lines) + "\n"
 
 
+def _render_audit(report, args):
+    import json as _json
+    from aegis.report.render import _SEV_ORDER
+    findings = sorted(report.findings,
+                      key=lambda f: (-(f.score or 0), _SEV_ORDER.get(f.severity, 9)))
+    summary = {b: 0 for b in ("critical", "high", "medium", "low", "info")}
+    for f in report.findings:
+        summary[f.severity] = summary.get(f.severity, 0) + 1
+    summary["total"] = len(report.findings)
+
+    if args.json:
+        out = {
+            "tool": "aegis", "mode": "audit", "audit_mode": report.mode,
+            "target": report.target, "scope": report.scope,
+            "packages": report.packages, "requests_sent": report.requests_sent,
+            "tool_version": report.tool_version, "warnings": report.warnings,
+            "errors": report.errors, "summary": summary,
+            "findings": [
+                {
+                    "layer": f.layer, "check": f.check, "severity": f.severity,
+                    "target": f.target, "detail": f.detail, "evidence": f.evidence,
+                    "cve_ids": f.cve_ids, "exploit_available": f.exploit_available,
+                    "score": f.score, "priority": f.priority,
+                }
+                for f in findings
+            ],
+        }
+        return _json.dumps(out, indent=2, default=str)
+
+    lines = [
+        f"\n  aegis · audit ({report.mode}) scan — vulnsurvey {report.tool_version}",
+        f"  Target:   {report.target}",
+        f"  Packages: {report.packages}   Requests: {report.requests_sent}",
+        f"  {summary['total']} findings  "
+        f"(critical {summary['critical']} · high {summary['high']} · "
+        f"medium {summary['medium']} · low {summary['low']} · info {summary['info']})",
+        "  " + "─" * 72,
+    ]
+    for f in findings[:300]:
+        sev = f.severity.upper().ljust(8)
+        prio = f"[{f.priority}] " if f.priority else ""
+        tag = " ⚑EXPLOIT" if f.exploit_available else ""
+        lines.append(f"  {sev} {prio}[{f.layer}] {f.check}{tag}")
+        lines.append(f"           {f.target}")
+        if f.detail:
+            lines.append(f"           {f.detail[:160]}")
+        if f.cve_ids:
+            lines.append(f"           CVEs: {', '.join(f.cve_ids[:5])}")
+    if report.errors:
+        lines.append("\n  WARNINGS:")
+        for e in report.errors[:20]:
+            lines.append(f"    • {e}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_verify(report, args):
+    import json as _json
+    if args.json:
+        out = {
+            "tool": "aegis", "mode": "verify", "msf_mode": report.mode,
+            "target": report.target, "scope": report.scope,
+            "msfconsole": report.msfconsole, "errors": report.errors,
+            "findings": [
+                {"module": f.module, "target": f.target, "mode": f.mode,
+                 "result": f.result, "detail": f.detail, "cve_ids": f.cve_ids}
+                for f in report.findings
+            ],
+        }
+        return _json.dumps(out, indent=2)
+
+    lines = [
+        f"\n  aegis · exploitability verification ({report.mode})",
+        f"  Target:     {report.target}",
+        f"  Scope:      {', '.join(report.scope)}",
+        f"  msfconsole: {report.msfconsole or 'not found'}",
+        "  " + "─" * 68,
+    ]
+    for f in report.findings:
+        lines.append(f"  [{f.result.upper()}] {f.module}  ({f.mode})")
+        if f.detail:
+            for dl in f.detail.splitlines():
+                lines.append(f"           {dl[:160]}")
+    if report.errors:
+        lines.append("\n  NOTES:")
+        for e in report.errors:
+            lines.append(f"    • {e}")
+    return "\n".join(lines) + "\n"
+
+
 # ── AI triage wrappers ────────────────────────────────────────────────────────
 
 def _ai_narrative(mode, report, args):
@@ -523,40 +730,35 @@ def _ai_narrative(mode, report, args):
     print("────────────────────────────────────────────────────────────────\n")
 
 
-def _ai_active_triage(report):
-    from aegis.ai_triage import triage_findings
+def _triage(report, store, id_key="check"):
+    """Shared AI/local triage: LLM ranking when available, always backed by the
+    deterministic local exploit-availability index. Never emits exploitation steps."""
+    from aegis.ai_triage import suggest_findings
     findings_dicts = [
-        {"check": f.check, "severity": f.severity, "detail": f.detail,
+        {"id": getattr(f, id_key, None) or getattr(f, "check", ""),
+         "severity": f.severity, "detail": f.detail,
          "cve_ids": f.cve_ids, "score": f.score}
         for f in report.findings
     ]
-    print("\n─── AI Triage (Top-10 Prioritized) ─────────────────────────────")
-    print(triage_findings(findings_dicts))
+    print("\n─── AI Triage & Remediation (detection-only) ───────────────────")
+    print(suggest_findings(findings_dicts, store))
     print("────────────────────────────────────────────────────────────────\n")
 
 
-def _ai_trivy_triage(report):
-    from aegis.ai_triage import triage_findings
-    findings_dicts = [
-        {"id": f.id, "severity": f.severity, "detail": f.detail,
-         "cve_ids": f.cve_ids, "score": f.score}
-        for f in report.findings
-    ]
-    print("\n─── AI Triage (Top-10 Prioritized) ─────────────────────────────")
-    print(triage_findings(findings_dicts))
-    print("────────────────────────────────────────────────────────────────\n")
+def _ai_active_triage(report, store):
+    _triage(report, store, id_key="check")
 
 
-def _ai_surface_triage(report):
-    from aegis.ai_triage import triage_findings
-    findings_dicts = [
-        {"id": f.check, "severity": f.severity, "detail": f.detail,
-         "cve_ids": f.cve_ids, "score": f.score}
-        for f in report.findings
-    ]
-    print("\n─── AI Triage (Top-10 Prioritized) ─────────────────────────────")
-    print(triage_findings(findings_dicts))
-    print("────────────────────────────────────────────────────────────────\n")
+def _ai_trivy_triage(report, store):
+    _triage(report, store, id_key="id")
+
+
+def _ai_surface_triage(report, store):
+    _triage(report, store, id_key="check")
+
+
+def _ai_audit_triage(report, store):
+    _triage(report, store, id_key="check")
 
 
 def _ai_rea_narrative(report):

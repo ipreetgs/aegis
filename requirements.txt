@@ -7,3 +7,9 @@ httpx>=0.27.0
 # All other scanners use Python stdlib only.
 # Active VAPT tool dependencies (installed on OS, not via pip):
 #   nmap, nikto, nuclei, sqlmap, ffuf, amass
+#
+# Bundled detection engines (optional; used by --audit and --active when importable).
+# Both are pure stdlib. Install them, or keep them beside aegis in the same parent dir:
+#   pip install ../netsurvey ../vulnsurvey
+# netsurvey   — native host/port/service/OS discovery (--active, replaces nmap dependency)
+# vulnsurvey  — deep web + dependency/CVE + secret detection (--audit)
